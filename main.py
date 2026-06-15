@@ -78,8 +78,8 @@ DEFAULT_MAX_TOKENS = 800
 MAX_CONCURRENT_RUNS = 1
 
 # 模型路由（任务要求：全员 Sonnet）
-LOCKED_MODEL = "claude-sonnet-4-6"
-LOCKED_BASE_URL = "https://www.zzzplus.com/v1"
+LOCKED_MODEL = "claude-opus-4-8"
+LOCKED_BASE_URL = "https://zzzplus.com"
 
 
 # ======================================================================
