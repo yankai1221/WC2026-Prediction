@@ -556,7 +556,10 @@ function appendEventLine(text, cls){
   el.className = 'event ' + (cls || '');
   el.textContent = text;
   document.getElementById('blackboard').appendChild(el);
-  scrollBlackboard(function appendRoundDivider(roundLabel){
+  scrollBlackboard();
+}
+
+function appendRoundDivider(roundLabel){
   const el = document.createElement('div');
   el.className = 'round-divider';
   el.textContent = '━━ ROUND ' + roundLabel + ' ━━';
