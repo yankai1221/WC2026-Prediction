@@ -692,7 +692,18 @@ function appendPosition(pos){
   });
 }
 function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-function scrollBlackboard(){ const bb = document.getElementById('blackboard'); bb.scrollTop = bb.scrollHeight; }
+function scrollBlackboard(){
+  const bb = document.getElementById('blackboard');
+  if (!bb) return;
+
+  // 留出 50px 的容错阈值。如果当前滚动条位置接近最底部，说明用户在挂机，允许自动随新字滚底
+  const isAtBottom = (bb.scrollHeight - bb.scrollTop - bb.clientHeight) < 50;
+
+  // 核心拦截：只有当用户本来就在底部时才自动滚底。如果用户手动上滑了，【绝对禁止】执行滚底，保护创始人的历史视线！
+  if (isAtBottom) {
+    bb.scrollTop = bb.scrollHeight;
+  }
+}
 
 let renderedEventCount = 0;
 function renderEventsDelta(events){
