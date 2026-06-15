@@ -1,215 +1,135 @@
-"""dry_run_pipeline.py —— 四角辩论系统的端到端干跑（OFFLINE + 风控锁版）。
+"""WC2026-Prediction · FastAPI 常驻量化服务。
 
-🚨 风控总开关（用户授权 ACK，2026-06-15）：
-    HARD_MAX_TURNS_PER_AGENT = 2        # 单 agent 内 LLM-turn 上限
-    DEADLINE_SECONDS         = 90       # 全 pipeline 总时长熔断
-    DebateEngine 内置硬上限    = 8       # 单次 debate.run 全局 agent 调用上限
-    odds_tools.OFFLINE_ONLY  = True     # 全程零网络，input_matches.json
+把单次干跑脚本（``dry_run_pipeline.py``）改造成可常驻 Zeabur 的 Web 服务：
+    GET  /                直接返回前端 SPA（static/index.html）
+    GET  /api/health      存活探针
+    GET  /api/match       读取 input_matches.json
+    POST /api/match/update 写入新 POST /api/debate      启动一次辩论；返回 ``run_id``
+    GET  /api/debate/{id} 拉取该 run 的进度 + 完整结果（前端轮询）
 
-执行流程：
-    1. 调用 sporttery_snapshot() —— 在 OFFLINE_ONLY 模式下直接读
-       项目根目录 input_matches.json，零 urllib。
-    2. 选第一场比赛（荷兰 vs 日本）作为辩论议题。
-    3. Mock LedgerStorage / Mock TickHost 满足 Protocol 而不真造 SQLite。
-    4. MockAgentRegistry 把 4 个 Soul YAML 编译为 system prompt，
-       接到真实 Anthropic 客户端（apex/primary 双档位）。
-    5. DebateEngine.run() 走完 R1 + R2 + CEO 综合 + CEO 决断（共 8 次调用）。
-    6. 决不启动 Ticker —— dry_run 是一次性脚本。
+风控总开关（继承 dry_run_pipeline.py 完整经验）：
+    OFFLINE_ONLY=True         — 不发任何 sporttery 请求
+    HARD_TOTAL_AGENT_CALLS=8  — debate.py 内置硬上限
+    HARD_MAX_TURNS_PER_AGENT=2
+    DEADLINE_SECONDS=180
+    ANTHROPIC_HTTP_TIMEOUT=60
+    MAX_CONCURRENT_RUNS=1     — 同一时刻只允许 1 个 run；高频点击直接 429
+    全员模型 = claude-sonnet-4-6
+    System prompt 强制 minimal=True
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 import sys
-import textwrap
+import threading
 import time
+import traceback
+import uuid
 from pathlib import Path
 from typing import Any
 
-# Windows GBK 终端 → 强制 UTF-8 输出
+# Windows 控制台中文兜底
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        pass
 
-sys.path.insert(0, str(Path(__file__).parent))
+import anthropic
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
-import anthropic  # noqa: E402
-from pydantic import BaseModel  # noqa: E402
-
-from lottery_kernel.agents import compose_system_prompt, load_soul  # noqa: E402
-from lottery_kernel.debate import (  # noqa: E402
+from lottery_kernel.agents import compose_system_prompt, load_soul
+from lottery_kernel.debate import (
     CircuitBreakerTripped,
     DebateEngine,
     HARD_TOTAL_AGENT_CALLS,
 )
-from lottery_kernel.models.debate_models import (  # noqa: E402
+from lottery_kernel.models.debate_models import (
     AgentPosition,
     CEODecision,
     DebateRound,
     DebateSynthesis,
 )
-from lottery_kernel.tools.odds_tools import (  # noqa: E402
-    LOTTERY_TOOL_DOCS,
-    LOTTERY_TOOLS,
-    OFFLINE_ONLY,
-    sporttery_snapshot,
-)
 
 
 # ======================================================================
-# 🚨 防爆风控锁
+# 配置
 # ======================================================================
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+log = logging.getLogger("wc2026")
+
+ROOT = Path(__file__).parent
+STATIC_DIR = ROOT / "static"
+MATCHES_FILE = ROOT / "input_matches.json"
+
+# 风控常量（与 dry_run_pipeline.py 同源）
 HARD_MAX_TURNS_PER_AGENT = 2
-"""单个 AnthropicAgent.call_structured 内部 LLM turn 上限。"""
-
 DEADLINE_SECONDS = 180
-"""整个 dry_run 从启动到结束的最大总时长。超过即熔断退出。"""
-
 ANTHROPIC_HTTP_TIMEOUT = 60.0
-"""单次 messages.create() HTTP 调用硬超时（秒）—— 防中转网络抽风。"""
-
 DEFAULT_MAX_TOKENS = 800
-"""单次结构化输出 token 上限 —— 降低串行吐字时延。"""
+MAX_CONCURRENT_RUNS = 1
 
-MINIMAL_SYSTEM_PROMPT = True
-"""C 方案脱水模式 —— 把 system prompt 从 3K 压到 ~600 tokens。"""
-
-
-class DryRunDeadlineExceeded(RuntimeError):
-    """全 pipeline 总时长熔断。"""
+# 模型路由（任务要求：全员 Sonnet）
+LOCKED_MODEL = "claude-sonnet-4-6"
+LOCKED_BASE_URL = "https://www.zzzplus.com/v1"
 
 
-_pipeline_start_monotonic: float | None = None
+# ======================================================================
+# run 注册表（内存）
+# ======================================================================
 
 
-def _enforce_deadline(stage: str) -> None:
-    if _pipeline_start_monotonic is None:
-        return
-    elapsed = time.monotonic() - _pipeline_start_monotonic
-    if elapsed > DEADLINE_SECONDS:
-        raise DryRunDeadlineExceeded(
-            f"deadline {DEADLINE_SECONDS}s exceeded at stage={stage} "
-            f"(elapsed={elapsed:.1f}s)"
-        )
+class RunStatus:
+    PENDING = "pending"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+    TIMEOUT = "timeout"
 
 
-# ----------------------------------------------------------------------
-# Mock LedgerStorage / Mock TickHost（满足 Protocol）
-# ----------------------------------------------------------------------
+class RunRecord(BaseModel):
+    run_id: str
+    match: dict
+    status: str
+    started_at: float
+    finished_at: float | None = None
+    budget_used: int = 0
+    budget_limit: int = HARD_TOTAL_AGENT_CALLS
+    events: list[dict] = Field(default_factory=list)
+    result: dict | None = None
+    error: str | None = None
 
 
-class InMemoryCursor:
-    def __init__(self, rows: list[dict]):
-        self._rows = rows
-
-    def fetchone(self) -> dict | None:
-        return self._rows[0] if self._rows else None
-
-    def fetchall(self) -> list[dict]:
-        return list(self._rows)
+_RUNS: dict[str, RunRecord] = {}
+_RUNS_LOCK = threading.Lock()
+_ACTIVE_SEM = threading.BoundedSemaphore(MAX_CONCURRENT_RUNS)
 
 
-class MockLedgerStorage:
-    """满足 LedgerStorage Protocol 的极简内存账本。
-
-    只支持 ledger 表的几条 SQL 模式（kernel ledger.py 真实用到的）。
-    """
-
-    def __init__(self) -> None:
-        self.entries: list[dict] = []
-        self._next_id = 1
-
-    def execute(self, sql: str, params: tuple | list = ()):
-        sql_lc = sql.lower().strip()
-        if sql_lc.startswith("select balance_after"):
-            if not self.entries:
-                return InMemoryCursor([])
-            return InMemoryCursor([{"balance_after": self.entries[-1]["balance_after"]}])
-        if sql_lc.startswith("insert into ledger"):
-            (amount, balance, desc, cat, did, pid, by, rid) = params
-            row = {
-                "id": self._next_id,
-                "amount": amount,
-                "balance_after": balance,
-                "description": desc,
-                "category": cat,
-                "directive_id": did,
-                "project_id": pid,
-                "approved_by": by,
-                "run_id": rid,
-            }
-            self._next_id += 1
-            self.entries.append(row)
-            return InMemoryCursor([])
-        return InMemoryCursor([])
-
-    def commit(self) -> None:
-        pass
+def _emit(rec: RunRecord, kind: str, payload: dict) -> None:
+    rec.events.append({"t": time.time(), "kind": kind, **payload})
 
 
-class MockApprovals:
-    def list_pending(self):
-        return []
-
-
-class MockProjects:
-    def list_active(self):
-        return []
-
-    def list_tasks(self, project_id: str):
-        return []
-
-
-class MockRuntimeGate:
-    def get(self):
-        return {"state": "running"}
-
-
-class MockTickHost:
-    def __init__(self):
-        self.runtime = MockRuntimeGate()
-        self.projects = MockProjects()
-        self.approvals = MockApprovals()
-        self.episodes = None
-
-    def heartbeat_once(self) -> None:
-        pass
-
-    def get_int_config(self, key: str, *, default: int) -> int:
-        return default
-
-    def run_one_pending_task(self, project_id: str) -> str | None:
-        return None
-
-
-# ----------------------------------------------------------------------
-# Anthropic-backed Agent (满足 AgentLike Protocol)
-# ----------------------------------------------------------------------
+# ======================================================================
+# Anthropic 智能体（精简版，继承 dry_run_pipeline 的 schema / 工具协议）
+# ======================================================================
 
 
 class _StructuredResp:
-    def __init__(self, parsed):
+    def __init__(self, parsed: Any):
         self.parsed = parsed
 
 
-SCHEMA_PATCH = {
-    "AgentPosition": AgentPosition,
-    "DebateSynthesis": DebateSynthesis,
-    "CEODecision": CEODecision,
-}
-
-
 def _pydantic_to_input_schema(model_cls: type[BaseModel]) -> dict:
-    """把 pydantic schema 转成 Anthropic tool 的 input_schema。
-
-    关键：**保留 $defs**——Claim/Source 是嵌套模型，schema 用 $ref
-    指向 #/$defs/Claim 这种引用，强删 $defs 会让所有引用悬空。
-
-    再做两件事强制好行为：
-      1. 去掉兼容/弃用字段（analysis / consensus_position / rationale），
-         否则模型会把所有内容倒进这些 free-text 字段，留 claims=[]。
-      2. 把 claims/recommendation 加入 required。
-    """
+    """复用 dry_run_pipeline.py 中的 schema 转换：保留 $defs、去 title、
+    把 claims / recommendation 等加进 required。"""
     schema = model_cls.model_json_schema()
     if schema.get("type") != "object":
         schema["type"] = "object"
@@ -224,39 +144,38 @@ def _pydantic_to_input_schema(model_cls: type[BaseModel]) -> dict:
                 _clean(v)
 
     _clean(schema)
-
-    deprecated_fields = {
-        "AgentPosition":   ["analysis"],
+    deprecated = {
+        "AgentPosition": ["analysis"],
         "DebateSynthesis": ["consensus_position"],
-        "CEODecision":     ["rationale"],
+        "CEODecision": ["rationale"],
     }
-    extra_required = {
-        "AgentPosition":   ["claims", "recommendation"],
+    required = {
+        "AgentPosition": ["claims", "recommendation"],
         "DebateSynthesis": ["consensus_claims", "recommended_option"],
-        "CEODecision":     ["decision", "rationale_claims", "issue_ticket"],
+        "CEODecision": ["decision", "rationale_claims", "issue_ticket"],
     }
     name = model_cls.__name__
-    props: dict = schema.get("properties", {})
-    for f in deprecated_fields.get(name, []):
+    props = schema.get("properties", {})
+    for f in deprecated.get(name, []):
         props.pop(f, None)
-    if name in extra_required:
+    if name in required:
         req = set(schema.get("required", []))
-        req.update(extra_required[name])
+        req.update(required[name])
         schema["required"] = sorted(req)
-
     schema.setdefault("additionalProperties", True)
     return schema
 
 
 class AnthropicAgent:
-    """绑一个 Soul 的真实 Anthropic 智能体。"""
+    """绑定一个 Soul 的 Anthropic 智能体。强制 minimal=True。"""
 
     def __init__(
         self,
         soul,
         client: anthropic.Anthropic,
         model: str,
-        toolbox: dict | None = None,
+        deadline_monotonic: float,
+        emit_fn,
     ):
         self.role = soul.role
         self.display_name = soul.display_name
@@ -264,10 +183,14 @@ class AnthropicAgent:
         self._soul = soul
         self._client = client
         self._model = model
-        self._system = compose_system_prompt(soul, minimal=MINIMAL_SYSTEM_PROMPT)
-        self._toolbox = toolbox or {}
+        self._system = compose_system_prompt(soul, minimal=True)
+        self._deadline = deadline_monotonic
+        self._emit = emit_fn
 
-    # ------------------ AgentLike contract ------------------
+    def _enforce_deadline(self, stage: str) -> None:
+        if time.monotonic() > self._deadline:
+            raise TimeoutError(f"pipeline deadline exceeded at {stage}")
+
     def call_structured(
         self,
         *,
@@ -282,69 +205,42 @@ class AnthropicAgent:
             "name": tool_name,
             "description": (
                 f"Submit your {output_schema.__name__} as a tool call. "
-                "This is the ONLY way to respond. Populate ``claims`` with "
-                "3-5 atomic factual statements; each evidence Source must "
-                "cite either odds_snapshot/sporttery_feed (when grounded in "
-                "the market snapshot) or agent_memory (domain knowledge). "
-                "Do NOT write free text outside this tool call."
+                "Populate ``claims`` with 3-5 atomic statements citing "
+                "user_input / agent_memory. Do NOT write free text."
             ),
             "input_schema": _pydantic_to_input_schema(output_schema),
         }
-        extra_tools = self._build_data_tools(action_type)
-        tools_first = [submit_tool] + extra_tools
-
-        first_choice = (
-            {"type": "any"} if extra_tools else {"type": "tool", "name": tool_name}
-        )
-
         messages: list[dict] = [{"role": "user", "content": prompt}]
-        force_submit_next = False
+        force_submit = False
 
-        # 🚨 HARD_MAX_TURNS_PER_AGENT 硬上限：通常 turn0 = call data，
-        # turn1 = forced submit；用 turn 数限制兜底，模型若再不出 submit
-        # 立即放弃，绝不进入第三轮 LLM 调用。
         for turn in range(HARD_MAX_TURNS_PER_AGENT):
-            _enforce_deadline(f"agent:{self.role}:turn{turn}")
-            choice = (
-                {"type": "tool", "name": tool_name}
-                if force_submit_next
-                else first_choice
-            )
-            tools_now = [submit_tool] if force_submit_next else tools_first
-            # 🚨 A 方案：HTTP 层防爆盾 —— 单点 HTTP 任何超时/错误都不许炸全场
+            self._enforce_deadline(f"agent:{self.role}:turn{turn}")
             try:
                 resp = self._client.messages.create(
                     model=self._model,
                     system=self._system,
-                    tools=tools_now,
-                    tool_choice=choice,
+                    tools=[submit_tool],
+                    tool_choice={"type": "tool", "name": tool_name},
                     max_tokens=max_tokens,
                     messages=messages,
                 )
-            except anthropic.APITimeoutError as exc:
-                print(f"\n  ⚠️  {self.role.upper()} HTTP timeout @ {ANTHROPIC_HTTP_TIMEOUT}s — 降级")
+            except anthropic.APITimeoutError:
+                self._emit("agent_timeout", {"role": self.role, "timeout_s": ANTHROPIC_HTTP_TIMEOUT})
                 fallback = output_schema()  # type: ignore[call-arg]
                 if hasattr(fallback, "recommendation"):
                     fallback.recommendation = "(timeout)"
-                if hasattr(fallback, "analysis"):
-                    fallback.analysis = (
-                        f"(HTTP timeout @ {ANTHROPIC_HTTP_TIMEOUT}s — agent "
-                        f"{self.role} unable to respond within budget)"
-                    )
                 if hasattr(fallback, "confidence"):
                     fallback.confidence = "低"
                 return _StructuredResp(fallback)
             except anthropic.APIStatusError as exc:
-                print(f"\n  ⚠️  {self.role.upper()} HTTP {exc.status_code} — 降级")
+                self._emit("agent_api_error", {"role": self.role, "status": exc.status_code})
                 fallback = output_schema()  # type: ignore[call-arg]
-                if hasattr(fallback, "analysis"):
-                    fallback.analysis = f"(API error {exc.status_code}: {str(exc)[:200]})"
+                if hasattr(fallback, "recommendation"):
+                    fallback.recommendation = f"(api {exc.status_code})"
                 return _StructuredResp(fallback)
             except anthropic.APIError as exc:
-                print(f"\n  ⚠️  {self.role.upper()} API error: {type(exc).__name__} — 降级")
+                self._emit("agent_api_error", {"role": self.role, "error": type(exc).__name__})
                 fallback = output_schema()  # type: ignore[call-arg]
-                if hasattr(fallback, "analysis"):
-                    fallback.analysis = f"({type(exc).__name__}: {str(exc)[:200]})"
                 return _StructuredResp(fallback)
 
             submit_block = next(
@@ -358,104 +254,17 @@ class AnthropicAgent:
                 except Exception as exc:  # noqa: BLE001
                     parsed = output_schema()  # type: ignore[call-arg]
                     if hasattr(parsed, "recommendation"):
-                        parsed.recommendation = f"(schema validation failed: {exc})"
+                        parsed.recommendation = f"(schema invalid: {exc})"
                 return _StructuredResp(parsed)
 
-            data_calls = [
-                b for b in resp.content
-                if getattr(b, "type", "") == "tool_use" and b.name in self._toolbox
-            ]
-            if not data_calls:
-                # 模型既没 submit 也没 call data → 下一轮强制 submit
-                force_submit_next = True
-                messages.append({"role": "user", "content": (
-                    f"You did NOT call any tool. In the next turn, call "
-                    f"`{tool_name}` directly and submit the structured result."
-                )})
-                continue
+            # 没出 submit → 强制下一轮
+            force_submit = True
+            messages.append({"role": "user", "content": f"You did NOT call `{tool_name}`. Call it now."})
 
-            messages.append({"role": "assistant", "content": resp.content})
-            tool_results = []
-            for call in data_calls:
-                args = self._normalize_data_args(call.name, call.input)
-                fn = self._toolbox[call.name]
-                try:
-                    obs = fn(None, args)
-                except Exception as exc:  # noqa: BLE001
-                    obs = json.dumps({"tool_error": f"{type(exc).__name__}: {exc}"})
-                if len(obs) > 4000:
-                    obs = obs[:4000] + "\n... [truncated]"
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": call.id,
-                    "content": obs,
-                })
-                _emit_tool_use(self.role, call.name, args, obs)
-            messages.append({"role": "user", "content": tool_results})
-            # 拿到数据后立刻强制下一轮 submit，防止无穷 ping
-            force_submit_next = True
-
-        # HARD_MAX_TURNS_PER_AGENT 用完仍未 submit → 兜底，绝不再发 LLM 请求
         fallback = output_schema()  # type: ignore[call-arg]
         if hasattr(fallback, "recommendation"):
-            fallback.recommendation = (
-                f"(agent {self.role} exhausted {HARD_MAX_TURNS_PER_AGENT} "
-                "turns without submitting)"
-            )
+            fallback.recommendation = "(exhausted turns)"
         return _StructuredResp(fallback)
-
-    def _normalize_data_args(self, tool_name: str, raw: dict | None) -> dict:
-        """模型常把 home/away 写成 match='A vs B' 或 team=…，这里救场。"""
-        r = dict(raw or {})
-        if tool_name in {"match_odds", "sporttery_match"}:
-            if "home" not in r or "away" not in r:
-                m = r.get("match") or r.get("fixture") or ""
-                team = r.get("team")
-                if " vs " in str(m):
-                    h, a = str(m).split(" vs ", 1)
-                    r.setdefault("home", h.strip())
-                    r.setdefault("away", a.strip())
-                elif team:
-                    r.setdefault("home", str(team))
-                    r.setdefault("away", "")
-        return r
-
-    def _build_data_tools(self, action_type: str) -> list[dict]:
-        """只在 round_1 / debate_round / synthesis 之外不开数据工具（避免反复调用）。"""
-        if not self._toolbox:
-            return []
-        # 只在 round 1（debate_round_1）启用，避免 R2/R3 重复爬
-        if action_type not in {"debate_round_1"}:
-            return []
-        defs = [
-            {
-                "name": "odds_snapshot",
-                "description": "拉取竞彩官方实时盘口快照。无参数。",
-                "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
-            },
-            {
-                "name": "match_odds",
-                "description": "查询 The Odds API 某场比赛的多家盘口。",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {"home": {"type": "string"}, "away": {"type": "string"}},
-                    "required": ["home", "away"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "sporttery_match",
-                "description": "在体彩快照中按队名子串搜索单场。",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {"home": {"type": "string"}, "away": {"type": "string"}},
-                    "additionalProperties": False,
-                },
-            },
-        ]
-        # 过滤：只暴露该 soul 在 yaml 里声明能用的工具
-        allowed = {t.split()[0] for t in self._soul.tools if not t.startswith("(")}
-        return [d for d in defs if d["name"] in allowed]
 
 
 class MockAgentRegistry:
@@ -466,234 +275,334 @@ class MockAgentRegistry:
         return self._agents[role]
 
 
-# ----------------------------------------------------------------------
-# 打印工具（中文友好）
-# ----------------------------------------------------------------------
+# ======================================================================
+# 数据 IO
+# ======================================================================
 
 
-def _box(title: str, ch: str = "─") -> None:
-    line = ch * 70
-    print()
-    print(line)
-    print(f"  {title}")
-    print(line)
+_MATCHES_LOCK = threading.Lock()
 
 
-def _emit_tool_use(role: str, tool: str, args: Any, obs: str) -> None:
-    print()
-    print(f"  ⟦TOOL⟧ {role.upper()} → {tool}({json.dumps(args, ensure_ascii=False)})")
-    obs_preview = obs[:300] + ("...[+]" if len(obs) > 300 else "")
-    print(f"          obs: {obs_preview}")
+def load_matches() -> dict:
+    if not MATCHES_FILE.exists():
+        return {"matches": []}
+    with _MATCHES_LOCK:
+        return json.loads(MATCHES_FILE.read_text(encoding="utf-8"))
 
 
-def _render_position(pos: AgentPosition) -> None:
-    print(f"\n  ⟦{pos.agent_name} / {pos.role if hasattr(pos, 'role') else pos.agent_role}⟧")
-    print(f"    confidence: {pos.confidence}")
-    print(f"    recommendation: {pos.recommendation}")
-    if pos.claims:
-        print(f"    claims ({len(pos.claims)}):")
-        for c in pos.claims:
-            srcs = ",".join(
-                (s.source_ref or s.source_type.value) for s in (c.evidence or [])
-            )
-            print(f"      • {c.text}  [{srcs}]")
-    elif pos.analysis:
-        print(f"    analysis: {textwrap.shorten(pos.analysis, 240)}")
+def save_matches(payload: dict) -> None:
+    with _MATCHES_LOCK:
+        MATCHES_FILE.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
 
-# ----------------------------------------------------------------------
-# Driver
-# ----------------------------------------------------------------------
+# ======================================================================
+# 辩论协程
+# ======================================================================
 
 
-def pick_match(snapshot: dict) -> dict:
-    """从快照中挑一场 2026 世界杯比赛。
-
-    优先策略：优先世界杯 league；其次直接取第一场。
-    """
-    matches = snapshot.get("matches", [])
-    if not matches:
-        raise RuntimeError("Sporttery snapshot returned no matches; cannot proceed.")
-    wc = [m for m in matches if "世界杯" in str(m.get("league", ""))]
-    return (wc[0] if wc else matches[0])
-
-
-def _force_local() -> bool:
-    return os.getenv("DRY_RUN_FORCE_LOCAL", "0").lower() in {"1", "true", "yes"}
-
-
-def build_market_context(match: dict, snap: dict) -> dict:
+def _build_market_context(match: dict) -> dict:
     dec = match.get("decimal", [None, None, None])
-    return {
+    dec_had = match.get("decimal_HAD") or []
+    ctx = {
         "match": f"{match.get('home')} vs {match.get('away')}",
         "league": match.get("league"),
-        "kickoff": f"{match.get('match_date')} {match.get('match_clock')}",
+        "kickoff": f"{match.get('match_date', '')} {match.get('match_clock', '')}".strip(),
         "market_code": match.get("market_code"),
         "market_name": match.get("market_name"),
         "goal_line": match.get("goal_line") or "(no handicap)",
-        "decimal_odds_HDA": dec,
-        "implied_probs_raw": [
-            round(100 / o, 1) if o else None for o in dec
+        "decimal_HHAD_HDA": dec,
+        "decimal_HAD_HDA": dec_had,
+        "implied_probs_raw_pct": [
+            round(100 / o, 1) if o else None for o in (dec or [])
         ],
-        "snapshot_source_url": snap.get("source_url"),
-        "snapshot_status": snap.get("status"),
     }
+    return ctx
 
 
-def main() -> int:
-    global _pipeline_start_monotonic
-    _pipeline_start_monotonic = time.monotonic()
+def _run_debate_sync(rec: RunRecord, api_key: str) -> None:
+    """在工作线程里跑 DebateEngine.run；写回 rec。"""
+    rec.status = RunStatus.RUNNING
+    rec.started_at = time.time()
+    deadline = time.monotonic() + DEADLINE_SECONDS
 
-    _box("STAGE 0 · 抓盘口（OFFLINE_ONLY = True）")
-    print(f"  OFFLINE_ONLY  : {OFFLINE_ONLY}")
-    print(f"  deadline      : {DEADLINE_SECONDS}s 总时长熔断")
-    print(f"  agent_calls   : {HARD_TOTAL_AGENT_CALLS} 次硬上限 (debate.py)")
-    print(f"  turns/agent   : {HARD_MAX_TURNS_PER_AGENT} 次硬上限 (本脚本)")
-    t0 = time.monotonic()
-    snap = sporttery_snapshot()  # OFFLINE_ONLY 下走 input_matches.json
-    fetch_elapsed = time.monotonic() - t0
-    print(f"  fetch elapsed : {fetch_elapsed:.3f}s")
-    print(f"  status        : {snap.get('status')}")
-    print(f"  source        : {snap.get('source')}")
-    print(f"  source_url    : {snap.get('source_url')}")
-    print(f"  matches count : {len(snap.get('matches', []))}")
-    if snap.get("fallback_reason"):
-        print(f"  fallback_reason: {snap.get('fallback_reason')[:140]}")
-    if snap.get("status") not in {"ok", "ok_local_fallback"}:
-        print(f"  error         : {snap.get('error', '')[:200]}")
-        return 2
-
-    match = pick_match(snap)
-    _box(f"STAGE 1 · 选定焦点战  →  {match.get('home')} vs {match.get('away')}")
-    print(f"  league        : {match.get('league')}")
-    print(f"  kickoff       : {match.get('match_date')} {match.get('match_clock')}")
-    print(f"  market        : {match.get('market_name')} (code={match.get('market_code')})")
-    print(f"  goal_line     : {match.get('goal_line') or '(no handicap)'}")
-    print(f"  decimal odds  : H={match['decimal'][0]} D={match['decimal'][1]} A={match['decimal'][2]}")
-
-    market_ctx = build_market_context(match, snap)
-
-    _box("STAGE 2 · 装配 4 角 Soul + 真实 Anthropic 客户端")
-    api_key = os.getenv("ANTHROPIC_AUTH_TOKEN") or os.getenv("ANTHROPIC_API_KEY")
-    base_url = os.getenv("ANTHROPIC_BASE_URL") or None
-    # 🚨 全员 Sonnet：绕开 Apex 物理队列瓶颈。
-    # 即便 ANTHROPIC_DEFAULT_OPUS_MODEL 环境变量指向 Opus，
-    # dry-run 内强制覆盖为 sonnet-4-6（避免中转商 Apex 队列卡死）。
-    sonnet_model = (
-        os.getenv("ANTHROPIC_DEFAULT_SONNET_MODEL")
-        or "claude-sonnet-4-6"
-    )
-    model_apex = sonnet_model
-    model_primary = sonnet_model
-    if not api_key:
-        print("  ERROR: ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY not set.")
-        return 3
-    print(f"  base_url      : {base_url or '(default)'}")
-    print(f"  apex model    : {model_apex}      (CEO — 强制 Sonnet)")
-    print(f"  primary model : {model_primary}  (CFO/CRO/Analyst — 强制 Sonnet)")
-
-    client = anthropic.Anthropic(
-        api_key=api_key,
-        base_url=base_url,
-        timeout=ANTHROPIC_HTTP_TIMEOUT,  # 🚨 35s 单点 HTTP 超时硬关
-    )
-
-    souls = {role: load_soul(role) for role in ("ceo", "cfo", "cro", "analyst")}
-    print(f"  souls loaded  : {list(souls.keys())}")
-    print(f"  http timeout  : {ANTHROPIC_HTTP_TIMEOUT}s 单点")
-    print(f"  max_tokens    : {DEFAULT_MAX_TOKENS} 紧凑模式")
-
-    # B方案：CRO/Analyst 不再有 data 工具回路，直接消费 prompt 里的 market_context
-    agents = {
-        "ceo":     AnthropicAgent(souls["ceo"],     client, model_apex,    toolbox=None),
-        "cfo":     AnthropicAgent(souls["cfo"],     client, model_primary, toolbox=None),
-        "cro":     AnthropicAgent(souls["cro"],     client, model_primary, toolbox=None),
-        "analyst": AnthropicAgent(souls["analyst"], client, model_primary, toolbox=None),
-    }
-    registry = MockAgentRegistry(agents)
-
-    _ = MockLedgerStorage(); _ = MockTickHost()  # 仅证明 Protocol 满足
-    print("  mock storage + host : Protocol 满足（无 SQLite 依赖）")
-
-    _box("STAGE 3 · 启动 DebateEngine（2 轮辩论，max_agent_calls=8）")
-    debate = DebateEngine(
-        registry,
-        num_rounds=2,
-        max_agent_calls=HARD_TOTAL_AGENT_CALLS,   # 🚨 全局熔断 8 次
-        on_round_end=lambda rt, positions: print(
-            f"\n  >>> Round {rt.value} 完成，收到 {len(positions)} 份立场 "
-            f"(budget used: {debate._budget.used}/{debate._budget.limit}) <<<"
-        ),
-    )
-
-    question = (
-        f"针对今晚 {match.get('home')} vs {match.get('away')}（{match.get('league')}，"
-        f"开赛 {match.get('match_date')} {match.get('match_clock')}）的比赛，"
-        f"请给出最大概率的体彩出单策略。"
-    )
-    print(f"\n  question: {question}")
+    def emit(kind: str, payload: dict) -> None:
+        with _RUNS_LOCK:
+            _emit(rec, kind, payload)
 
     try:
+        client = anthropic.Anthropic(
+            api_key=api_key,
+            base_url=LOCKED_BASE_URL,
+            timeout=ANTHROPIC_HTTP_TIMEOUT,
+        )
+        souls = {r: load_soul(r) for r in ("ceo", "cfo", "cro", "analyst")}
+        agents = {
+            r: AnthropicAgent(souls[r], client, LOCKED_MODEL, deadline, emit)
+            for r in ("ceo", "cfo", "cro", "analyst")
+        }
+        registry = MockAgentRegistry(agents)
+
+        def on_round_end(rt: DebateRound, positions: list[AgentPosition]) -> None:
+            emit("round_end", {
+                "round": rt.value,
+                "positions": [
+                    {
+                        "role": p.agent_role,
+                        "display_name": p.agent_name,
+                        "squad": p.squad,
+                        "confidence": p.confidence,
+                        "recommendation": p.recommendation,
+                        "claims": [
+                            {"text": c.text, "evidence": [
+                                {"src_type": s.source_type.value, "src_ref": s.source_ref}
+                                for s in (c.evidence or [])
+                            ]}
+                            for c in (p.claims or [])
+                        ],
+                    }
+                    for p in positions
+                ],
+                "budget_used": registry.get("ceo")._client and 0,  # placeholder
+            })
+
+        debate = DebateEngine(
+            registry,
+            num_rounds=2,
+            max_agent_calls=HARD_TOTAL_AGENT_CALLS,
+            on_round_end=on_round_end,
+        )
+        emit("started", {
+            "match": f"{rec.match.get('home')} vs {rec.match.get('away')}",
+            "model": LOCKED_MODEL,
+            "deadline_s": DEADLINE_SECONDS,
+        })
+
+        question = (
+            f"针对 {rec.match.get('home')} vs {rec.match.get('away')}"
+            f"（{rec.match.get('league')}，{rec.match.get('match_date')} "
+            f"{rec.match.get('match_clock')}）的多类别概率分布下的资金分配建议，"
+            f"请给出最大概率的结构化决策方案。"
+        )
+        market_ctx = _build_market_context(rec.match)
         result = debate.run(question, market_context=market_ctx)
-    except DryRunDeadlineExceeded as exc:
-        _box("‼️ 90s 总时长熔断")
-        print(f"  reason: {exc}")
-        return 7
+        rec.budget_used = debate._budget.used
 
-    elapsed_total = time.monotonic() - _pipeline_start_monotonic
-    print(f"\n  total elapsed : {elapsed_total:.2f}s "
-          f"(budget used: {debate._budget.used}/{debate._budget.limit})")
-
-    _box("STAGE 4 · 各轮发言摘要")
-    for i, rnd in enumerate(result.rounds, 1):
-        print(f"\n── Round {i} ───────────────────────────────────")
-        for pos in rnd:
-            _render_position(pos)
-
-    _box("STAGE 5 · CEO 综合 (Synthesis)")
-    syn = result.synthesis
-    print(f"\n  recommended_option : {syn.recommended_option}")
-    print(f"  consensus_claims   :")
-    for c in syn.effective_consensus_claims():
-        print(f"    • {c.text}")
-    print(f"  key_tensions       : {syn.key_tensions}")
-    print(f"  risk_flags         : {syn.risk_flags}")
-
-    _box("STAGE 6 · CEO 最终决断 (CEODecision JSON)")
-    dec = result.decision
-    payload = {
-        "match": f"{match.get('home')} vs {match.get('away')}",
-        "decision": dec.decision,
-        "issue_ticket": dec.issue_ticket,
-        "scorelines": dec.scorelines,
-        "stake_allocation_CNY": dec.stake_allocation,
-        "stake_total_CNY": round(sum(dec.stake_allocation.values()), 2),
-        "rationale_claims": [
-            {
-                "text": c.text,
-                "evidence": [
+        dec = result.decision
+        rec.result = {
+            "match": f"{rec.match.get('home')} vs {rec.match.get('away')}",
+            "decision": dec.decision,
+            "issue_ticket": dec.issue_ticket,
+            "scorelines": list(dec.scorelines or []),
+            "stake_allocation_CNY": dict(dec.stake_allocation or {}),
+            "stake_total_CNY": round(sum((dec.stake_allocation or {}).values()), 2),
+            "rationale_claims": [
+                {"text": c.text, "evidence": [
                     {"src_type": s.source_type.value, "src_ref": s.source_ref}
                     for s in (c.evidence or [])
+                ]}
+                for c in (dec.rationale_claims or [])
+            ],
+            "synthesis": {
+                "recommended_option": result.synthesis.recommended_option,
+                "consensus_claims": [
+                    {"text": c.text} for c in result.synthesis.effective_consensus_claims()
                 ],
-            }
-            for c in (dec.rationale_claims or [])
-        ],
-    }
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+                "key_tensions": list(result.synthesis.key_tensions or []),
+                "risk_flags": list(result.synthesis.risk_flags or []),
+            },
+            "agents_participated": list(result.agents_participated or []),
+            "budget_used": debate._budget.used,
+            "budget_limit": debate._budget.limit,
+        }
+        rec.status = RunStatus.DONE
+        emit("done", {"budget_used": debate._budget.used})
+    except TimeoutError as exc:
+        rec.status = RunStatus.TIMEOUT
+        rec.error = str(exc)
+        emit("deadline", {"error": str(exc)})
+    except CircuitBreakerTripped as exc:
+        rec.status = RunStatus.FAILED
+        rec.error = str(exc)
+        emit("circuit_breaker", {"used": exc.used, "limit": exc.limit, "stage": exc.stage})
+    except Exception as exc:  # noqa: BLE001
+        rec.status = RunStatus.FAILED
+        rec.error = f"{type(exc).__name__}: {exc}"
+        emit("error", {"error": rec.error, "tb": traceback.format_exc()[-800:]})
+    finally:
+        rec.finished_at = time.time()
+        _ACTIVE_SEM.release()
+        log.info("run %s finished: status=%s budget=%d", rec.run_id, rec.status, rec.budget_used)
 
-    _box("STAGE 7 · CFO 风控宪法自动校验")
-    total = payload["stake_total_CNY"]
-    envelope_ok = 100 <= total <= 500 if dec.issue_ticket else True
-    print(f"  总注金 = {total} CNY")
-    print(f"  100~500 包络通过: {envelope_ok}")
-    if dec.issue_ticket and dec.stake_allocation:
-        per = ", ".join(f"{k}={v}" for k, v in dec.stake_allocation.items())
-        print(f"  分配: {per}")
-    print(f"  scorelines 数量: {len(dec.scorelines)}  (≤3: {len(dec.scorelines) <= 3})")
-    print(f"  issue_ticket: {dec.issue_ticket}")
-    print()
-    return 0 if envelope_ok else 1
+
+# ======================================================================
+# FastAPI
+# ======================================================================
+
+app = FastAPI(title="WC2026-Prediction", version="0.1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+@app.get("/")
+def index():
+    idx = STATIC_DIR / "index.html"
+    if not idx.exists():
+        return JSONResponse({"error": "index.html missing"}, status_code=500)
+    return FileResponse(str(idx))
+
+
+@app.get("/api/health")
+def health():
+    return {
+        "ok": True,
+        "active_runs": MAX_CONCURRENT_RUNS - _ACTIVE_SEM._value,
+        "model": LOCKED_MODEL,
+        "base_url": LOCKED_BASE_URL,
+        "deadline_s": DEADLINE_SECONDS,
+        "max_agent_calls": HARD_TOTAL_AGENT_CALLS,
+    }
+
+
+@app.get("/api/match")
+def get_matches():
+    data = load_matches()
+    return {"ok": True, **data}
+
+
+class MatchUpdatePayload(BaseModel):
+    home: str
+    away: str
+    league: str = "世界杯"
+    match_date: str = ""
+    match_clock: str = ""
+    market_code: str = "HHAD"
+    market_name: str = "让球胜平负"
+    goal_line: str = "-1.00"
+    decimal: list[float]
+    decimal_HAD: list[float] = Field(default_factory=list)
+    index: int = 0
+
+
+@app.post("/api/match/update")
+def update_match(payload: MatchUpdatePayload):
+    if len(payload.decimal) != 3:
+        raise HTTPException(400, "decimal must have 3 values [H,D,A]")
+    if payload.decimal_HAD and len(payload.decimal_HAD) != 3:
+        raise HTTPException(400, "decimal_HAD must have 3 values [H,D,A] or be empty")
+    data = load_matches()
+    matches = data.get("matches") or []
+    entry = {
+        "home": payload.home.strip(),
+        "away": payload.away.strip(),
+        "league": payload.league.strip() or "世界杯",
+        "match_date": payload.match_date.strip(),
+        "match_clock": payload.match_clock.strip(),
+        "market_code": payload.market_code.strip() or "HHAD",
+        "market_name": payload.market_name.strip() or "让球胜平负",
+        "goal_line": payload.goal_line.strip() or "-1.00",
+        "decimal": payload.decimal,
+        "decimal_HAD": payload.decimal_HAD,
+        "source": "web ui update",
+    }
+    if 0 <= payload.index < len(matches):
+        matches[payload.index] = entry
+    else:
+        matches.append(entry)
+    data["matches"] = matches
+    save_matches(data)
+    return {"ok": True, "saved": entry, "total": len(matches)}
+
+
+class DebateStartPayload(BaseModel):
+    api_key: str
+    match_index: int = 0
+
+
+@app.post("/api/debate")
+def start_debate(payload: DebateStartPayload):
+    api_key = payload.api_key.strip()
+    if not api_key:
+        raise HTTPException(400, "api_key required")
+
+    data = load_matches()
+    matches = data.get("matches") or []
+    if not matches:
+        raise HTTPException(400, "no matches in input_matches.json")
+    if payload.match_index < 0 or payload.match_index >= len(matches):
+        raise HTTPException(400, f"match_index out of range (0..{len(matches)-1})")
+    match = matches[payload.match_index]
+
+    if not _ACTIVE_SEM.acquire(blocking=False):
+        raise HTTPException(429, "another debate is running; please wait")
+
+    run_id = uuid.uuid4().hex[:12]
+    rec = RunRecord(
+        run_id=run_id,
+        match=match,
+        status=RunStatus.PENDING,
+        started_at=time.time(),
+    )
+    with _RUNS_LOCK:
+        _RUNS[run_id] = rec
+
+    thread = threading.Thread(
+        target=_run_debate_sync,
+        args=(rec, api_key),
+        name=f"debate-{run_id}",
+        daemon=True,
+    )
+    thread.start()
+    return {"ok": True, "run_id": run_id, "match": match}
+
+
+@app.get("/api/debate/{run_id}")
+def poll_debate(run_id: str):
+    with _RUNS_LOCK:
+        rec = _RUNS.get(run_id)
+        if rec is None:
+            raise HTTPException(404, "run_id not found")
+        # 浅变
+        return {
+            "ok": True,
+            "run_id": rec.run_id,
+            "status": rec.status,
+            "started_at": rec.started_at,
+            "finished_at": rec.finished_at,
+            "budget_used": rec.budget_used,
+            "budget_limit": rec.budget_limit,
+            "events": list(rec.events),
+            "result": rec.result,
+            "error": rec.error,
+        }
+
+
+# ======================================================================
+# uvicorn 入口
+# ======================================================================
+
+def run_server() -> None:
+    import uvicorn
+    port = int(os.getenv("PORT", "8000"))
+    log.info("WC2026 server starting on :%d (model=%s)", port, LOCKED_MODEL)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=port,
+        log_level="info",
+        access_log=True,
+    )
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    run_server()
