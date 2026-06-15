@@ -1,0 +1,19 @@
+{
+  "comment": "本地硬编码焦点战 —— 用户授权的唯一数据源 (OFFLINE_ONLY)。荷兰 vs 日本，让球 -1。decimal = HHAD 让球盘，decimal_HAD = 不让球欧赔。",
+  "matches": [
+    {
+      "home": "荷兰",
+      "away": "日本",
+      "league": "世界杯",
+      "match_no": "周一003",
+      "match_date": "2026-06-16",
+      "match_clock": "21:00",
+      "market_code": "HHAD",
+      "market_name": "让球胜平负",
+      "goal_line": "-1.00",
+      "decimal": [4.00, 3.40, 1.71],
+      "decimal_HAD": [1.86, 3.38, 3.38],
+      "source": "user-provided (image.png)"
+    }
+  ]
+}

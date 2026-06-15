@@ -1,0 +1,35 @@
+{
+  "$schema": "https://schema.zeabur.app/zeabur.schema.json",
+  "name": "lottery-kernel",
+  "description": "Lottery debate + risk-control kernel (offline-only single-shot)",
+  "build": {
+    "buildCommand": "pip install --no-cache-dir -r requirements.txt"
+  },
+  "start": {
+    "startCommand": "python -X utf8 dry_run_pipeline.py"
+  },
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": {
+      "default": "",
+      "description": "Anthropic API key (or proxy auth token). Empty triggers fail-loud."
+    },
+    "ANTHROPIC_BASE_URL": {
+      "default": "https://api.anthropic.com",
+      "description": "Optional proxy base URL; defaults to official endpoint."
+    },
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": {
+      "default": "claude-sonnet-4-6",
+      "description": "All 4 agents (CEO/CFO/CRO/Analyst) use this Sonnet tier."
+    },
+    "PYTHONUNBUFFERED": {
+      "default": "1",
+      "description": "Force unbuffered stdout for live logs."
+    }
+  },
+  "runtime": {
+    "python": "3.11"
+  },
+  "healthcheck": {
+    "type": "none"
+  }
+}

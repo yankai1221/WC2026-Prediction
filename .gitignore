@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+*.spec
+.venv/
+venv/
+env/
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Claude Code 本地缓存
+.claude/
+
+# 参考资料（不上 git，仅本地保留）
+Football-2026-main/
+Kompany-main/
+WC2026-master/
+worldcut-2026-main/
+
+# 本地秘钥与日志
+.env
+.env.*
+*.log
+*.sqlite3
+*.sqlite
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 临时
+*.tmp
+*.bak
