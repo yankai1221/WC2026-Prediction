@@ -2,247 +2,318 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
 <title>WC2026 · 四角辩论 · Quant Console</title>
 <style>
 :root {
-  --bg-0: #05070d;
-  --bg-1: #0a0f1c;
-  --bg-2: #111728;
-  --border: rgba(120, 180, 255, 0.15);
-  --border-hot: rgba(0, 220, 180, 0.55);
-  --text: #d8e3f5;
-  --text-dim: #6e7c94;
-  --accent: #00ffcc;
-  --accent-warm: #ffae3d;
-  --danger: #ff5d6c;
-  --cfo: #ffae3d;
-  --cro: #ff5d6c;
-  --analyst: #00ffcc;
-  --ceo: #d6a3ff;
+  --bg-root: #0d1117;
+  --bg-card: rgba(22, 27, 34, 0.88);
+  --bg-input: rgba(0, 0, 0, 0.45);
+  --text: #e6edf3;
+  --text-dim: #8b949e;
+  --accent: #58a6ff;
+  --accent-warm: #f0883e;
+  --danger: #ff7b72;
+
+  /* 五色板块边框 */
+  --border-key:     #8b949e;
+  --border-data:    #58a6ff;
+  --border-run:     #39d353;
+  --border-board:   #f0883e;
+  --border-verdict: #bc8cff;
+
+  /* 角色色（黑板气泡） */
+  --cfo:     #f0883e;
+  --cro:     #ff7b72;
+  --analyst: #39d353;
+  --ceo:     #bc8cff;
 }
 * { box-sizing: border-box; }
-body {
-  margin: 0;
-  background: radial-gradient(ellipse at 20% 0%, #0c1430 0%, var(--bg-0) 55%);
+html, body {
+  margin: 0; padding: 0;
+  background:
+    radial-gradient(ellipse at 12% -10%, rgba(88,166,255,0.10) 0%, transparent 55%),
+    radial-gradient(ellipse at 110% 10%, rgba(188,140,255,0.08) 0%, transparent 55%),
+    var(--bg-root);
   color: var(--text);
-  font-family: "JetBrains Mono", "SF Mono", Consolas, monospace;
+  font-family: "JetBrains Mono", "SF Mono", Consolas, "Microsoft YaHei", monospace;
   min-height: 100vh;
+  -webkit-text-size-adjust: 100%;
 }
 header {
-  display: flex; justify-content: space-between; align-items: center;
-  padding: 18px 32px;
-  border-bottom: 1px solid var(--border);
-  background: rgba(7,11,21,0.6);
-  position: sticky; top: 0; backdrop-filter: blur(8px); z-index: 50;
+  display: flex; justify-content: center; align-items: center;
+  padding: 18px 24px;
+  border-bottom: 1px solid rgba(139,148,158,0.18);
+  background: rgba(13,17,23,0.6);
+  position: sticky; top: 0; backdrop-filter: blur(10px); z-index: 50;
 }
 header h1 {
   margin: 0;
-  font-size: 18px;
-  letter-spacing: 4px;
+  font-size: 17px;
+  letter-spacing: 5px;
   color: var(--accent);
-  text-shadow: 0 0 8px rgba(0, 255, 204, 0.35);
+  text-shadow: 0 0 10px rgba(88,166,255,0.35);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-header .meta { font-size: 12px; color: var(--text-dim); }
-header .meta b { color: var(--accent-warm); }
+
 .grid {
   display: grid;
-  grid-template-columns: 380px 1fr;
-  gap: 16px;
-  padding: 24px 32px;
+  grid-template-columns: 400px 1fr;
+  gap: 22px;
+  padding: 24px 32px 48px;
+  max-width: 1600px;
+  margin: 0 auto;
 }
-.col-left { display: flex; flex-direction: column; gap: 16px; }
-.col-right { display: flex; flex-direction: column; gap: 16px; }
+.col-left  { display: flex; flex-direction: column; gap: 22px; }
+.col-right { display: flex; flex-direction: column; gap: 22px; }
+
+/* ===== 五色卡片基础样式 ===== */
 .panel {
-  background: linear-gradient(180deg, var(--bg-1), var(--bg-2));
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 16px 18px;
+  background: var(--bg-card);
+  backdrop-filter: blur(6px);
+  border: 1px solid rgba(139,148,158,0.25);
+  border-radius: 12px;
+  padding: 18px 20px;
   position: relative;
+  box-shadow:
+    0 6px 22px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.02);
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
 }
+.panel:hover { transform: translateY(-1px); }
+
+.panel.key     { border-color: var(--border-key);     box-shadow: 0 6px 22px rgba(0,0,0,0.45), 0 0 0 1px rgba(139,148,158,0.30), 0 0 18px rgba(139,148,158,0.10); }
+.panel.data    { border-color: var(--border-data);    box-shadow: 0 6px 22px rgba(0,0,0,0.45), 0 0 0 1px rgba(88,166,255,0.30),  0 0 22px rgba(88,166,255,0.16); }
+.panel.run     { border-color: var(--border-run);     box-shadow: 0 6px 22px rgba(0,0,0,0.45), 0 0 0 1px rgba(57,211,83,0.34),   0 0 22px rgba(57,211,83,0.18); }
+.panel.board   { border-color: var(--border-board);   box-shadow: 0 6px 22px rgba(0,0,0,0.45), 0 0 0 1px rgba(240,136,62,0.34),  0 0 24px rgba(240,136,62,0.16); }
+.panel.verdict { border-color: var(--border-verdict); box-shadow: 0 8px 28px rgba(0,0,0,0.55), 0 0 0 1px rgba(188,140,255,0.40), 0 0 28px rgba(188,140,255,0.20); }
+
 .panel-title {
   font-size: 12px; letter-spacing: 3px;
-  color: var(--accent);
-  border-bottom: 1px dashed var(--border);
-  padding-bottom: 6px; margin-bottom: 12px;
+  padding-bottom: 8px; margin-bottom: 14px;
+  border-bottom: 1px dashed rgba(139,148,158,0.22);
+  display: flex; justify-content: space-between; align-items: center;
 }
-.panel-title .tag {
-  float: right; font-size: 10px; color: var(--text-dim);
-  letter-spacing: 1px;
-}
+.panel.key     .panel-title { color: var(--border-key); }
+.panel.data    .panel-title { color: var(--border-data); }
+.panel.run     .panel-title { color: var(--border-run); }
+.panel.board   .panel-title { color: var(--border-board); }
+.panel.verdict .panel-title { color: var(--border-verdict); }
+.panel-title .tag { font-size: 10px; color: var(--text-dim); letter-spacing: 1.5px; }
+
 label {
   display: block;
   font-size: 11px;
-  color: var(--text-dim);-bottom: 4px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
   letter-spacing: 1px;
 }
 input[type="text"], input[type="password"], input[type="number"] {
   width: 100%;
-  background: rgba(0,0,0,0.4);
+  background: var(--bg-input);
   color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 3px;
-  padding: 7px 10px;
+  border: 1px solid rgba(139,148,158,0.30);
+  border-radius: 6px;
+  padding: 9px 12px;
   font-family: inherit;
   font-size: 13px;
+  transition: border 0.15s, box-shadow 0.15s;
 }
-input:focus { outline: none; border-color: var(--accent); }
+input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(88,166,255,0.18);
+}
 button {
-  background: linear-gradient(180deg, #0a1a30, #07101c);
+  background: linear-gradient(180deg, #1c2230, #11151d);
   color: var(--accent);
   border: 1px solid var(--accent);
-  border-radius: 3px;
-  padding: 8px 18px;
+  border-radius: 6px;
+  padding: 10px 18px;
   cursor: pointer;
   font-family: inherit;
   font-size: 12px;
   letter-spacing: 2px;
   transition: all 0.15s;
 }
-button:hover { box-shadow: 0 0 12px rgba(0,255,204,0.4); transform: translateY(-1px); }
-button.warn { color: var(--accent-warm); border-color: var(--accent-warm); }
-button.warn:hover { box-shadow: 0 0 12px rgba(255,174,61,0.4); }
-button:disabled { opacity: 0.35; cursor: not-allowed; box-shadow: none; transform: none; }
+button:hover { box-shadow: 0 0 14px rgba(88,166,255,0.35); transform: translateY(-1px); }
+button.warn  { color: var(--accent-warm); border-color: var(--accent-warm); }
+button.warn:hover { box-shadow: 0 0 14px rgba(240,136,62,0.35); }
+button.go    { color: var(--border-run); border-color: var(--border-run); }
+button.go:hover { box-shadow: 0 0 16px rgba(57,211,83,0.40); }
+button:disabled { opacity: 0.4; cursor: not-allowed; box-shadow: none; transform: none; }
+
 .row { display: grid; gap: 10px; }
 .row.cols-2 { grid-template-columns: 1fr 1fr; }
 .row.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
-.hint { font-size: 11px; color: var(--text-dim); margin-top: 6px; }
-.hint code { color: var(--accent); background: rgba(0,0,0,0.4); padding: 1px 4px; border-radius: 2px; }
+.hint { font-size: 11px; color: var(--text-dim); margin-top: 8px; line-height: 1.5; }
+.hint code { color: var(--accent); background: rgba(0,0,0,0.45); padding: 1px 5px; border-radius: 3px; }
 .status-strip {
   font-size: 11px; color: var(--text-dim);
   display: flex; gap: 16px; flex-wrap: wrap;
-  margin-top: 8px;
+  margin-top: 10px;
 }
 .status-strip span b { color: var(--accent); }
 
-/* 黑板 */
+/* ===== 黑板（04） ===== */
 .blackboard {
   min-height: 320px;
-  max-height: 540px;
+  max-height: 560px;
   overflow-y: auto;
   padding-right: 6px;
 }
 .blackboard::-webkit-scrollbar { width: 6px; }
-.blackboard::-webkit-scrollbar-thumb { background: rgba(0,255,204,0.3); border-radius: 3px; }
+.blackboard::-webkit-scrollbar-thumb { background: rgba(240,136,62,0.40); border-radius: 3px; }
 .bubble {
   margin-bottom: 14px;
-  padding: 10px 14px;
+  padding: 12px 16px;
   border-left: 3px solid var(--text-dim);
-  background: rgba(255,255,255,0.02);
-  border-radius: 0 4px 4px 0;
+  background: rgba(255,255,255,0.025);
+  border-radius: 0 8px 8px 0;
   animation: fadein 0.4s ease-out;
 }
 @keyframes fadein {
   from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
+  to   { opacity: 1; transform: translateY(0); }
 }
-.bubble.cfo { border-left-color: var(--cfo); }
-.bubble.cro { border-left-color: var(--cro); }
+.bubble.cfo     { border-left-color: var(--cfo); }
+.bubble.cro     { border-left-color: var(--cro); }
 .bubble.analyst { border-left-color: var(--analyst); }
-.bubble.ceo { border-left-color: var(--ceo); }
+.bubble.ceo     { border-left-color: var(--ceo); }
 .bubble .head {
   display: flex; justify-content: space-between;
   font-size: 11px; color: var(--text-dim);
-  margin-bottom: 6px;
+  margin-bottom: 8px;
   letter-spacing: 1px;
 }
 .bubble .head .role { color: var(--text); font-weight: bold; letter-spacing: 2px; }
-.bubble.cfo .head .role { color: var(--cfo); }
-.bubble.cro .head .role { color: var(--cro); }
-.bubble.analyst .head .role { colo--analyst); }
-.bubble.ceo .head .role { color: var(--ceo); }
-.bubble .reco { font-size: 13px; color: var(--text); margin-bottom: 6px; }
-.bubble ul { margin: 4px 0 0 0; padding-left: 16px; }
-.bubble li { font-size: 12px; color: var(--text); margin-bottom: 4px; }
+.bubble.cfo     .head .role { color: var(--cfo); }
+.bubble.cro     .head .role { color: var(--cro); }
+.bubble.analyst .head .role { color: var(--analyst); }
+.bubble.ceo     .head .role { color: var(--ceo); }
+.bubble .reco { font-size: 13px; color: var(--text); margin-bottom: 6px; line-height: 1.6; word-wrap: break-word; }
+.bubble ul { margin: 6px 0 0 0; padding-left: 18px; }
+.bubble li { font-size: 12px; color: var(--text); margin-bottom: 5px; line-height: 1.6; word-wrap: break-word; }
 .bubble li .src { font-size: 10px; color: var(--text-dim); margin-left: 4px; }
 .round-divider {
-  font-size: 11px; letter-spacing: 3px;
-  color: var(--accent-warm); border-top: 1px dashed var(--border);
-  margin: 12px 0 10px; padding-top: 6px;
+  font-size: 11px; letter-spacing: 4px;
+  color: var(--accent-warm); border-top: 1px dashed rgba(240,136,62,0.30);
+  margin: 14px 0 10px; padding-top: 8px;
 }
 .event {
   font-size: 11px; color: var(--text-dim);
   font-style: italic;
   margin-bottom: 6px;
+  word-wrap: break-word;
 }
-.event.warn { color: var(--accent-warm); }
+.event.warn  { color: var(--accent-warm); }
 .event.error { color: var(--danger); }
 
-/* 决断面板 */
-.verdict {
-  background: linear-gradient(180deg, rgba(214,163,255,0.08), rgba(0,255,204,0.04));
-  border: 1px solid rgba(214,163,255,0.4);
-  border-radius: 6px;
-  padding: 18px 22px;
-}
-.verdict h2 {
-  margin: 0 0 12px; font-size: 16px;
-  letter-spacing: 4px; color: var(--ceo);
-  text-shadow: 0 0 6px rgba(214,163,255,0.4);
-}
+/* ===== CEO 终审（皇家紫） ===== */
 .verdict .decision-line {
-  font-size: 18px; color: var(--text);
-  line-height: 1.6; margin-bottom: 12px;
+  font-size: 17px; color: var(--text);
+  line-height: 1.7; margin-bottom: 14px;
+  word-wrap: break-word;
 }
-.verdict .issue-pill {
-  display: inline-block; padding: 3px 10px; border-radius: 2px;
-  font-size: 11px; letter-spacing: 2px;
+.issue-pill {
+  display: inline-block; padding: 4px 12px; border-radius: 4px;
+  font-size: 11px; letter-spacing: 2px; font-weight: bold;
 }
-.verdict .issue-pill.yes { background: var(--accent); color: #000; }
-.verdict .issue-pill.no { background: var(--danger); color: #000; }
-.verdict .scorelines { display: flex; gap: 10px; margin: 10px 0; flex-wrap: wrap; }
-.verdict .scoreline {
+.issue-pill.yes { background: var(--border-run); color: #000; }
+.issue-pill.no  { background: var(--danger); color: #000; }
+
+.scorelines { display: flex; gap: 10px; margin: 10px 0; flex-wrap: wrap; }
+.scoreline {
   font-size: 22px; letter-spacing: 4px;
-  border: 1px solid var(--accent); padding: 8px 14px;
-  border-radius: 4px; background: rgba(0,255,204,0.05);
+  border: 1px solid var(--ceo); padding: 8px 16px;
+  border-radius: 6px; background: rgba(188,140,255,0.06);
+  color: var(--text);
 }
 .alloc-bar {
-  display: flex; align-items: center; gap: 8px;
-  font-size: 12px; margin-bottom: 6px;
+  display: flex; align-items: center; gap: 10px;
+  font-size: 12px; margin-bottom: 8px;
 }
-.alloc-bar .key { width: 140px; color: var(--text-dim); }
+.alloc-bar .key { width: 150px; color: var(--text-dim); flex-shrink: 0; word-wrap: break-word; }
 .alloc-bar .bar {
   flex: 1; height: 14px; background: rgba(0,0,0,0.5);
-  border-radius: 2px; overflow: hidden;
+  border-radius: 4px; overflow: hidden;
 }
 .alloc-bar .fill { height: 100%; background: linear-gradient(90deg, var(--analyst), var(--accent-warm)); }
-.alloc-bar .amount { width: 80px; text-align: right; color: var(--text); }
+.alloc-bar .amount { width: 110px; text-align: right; color: var(--text); flex-shrink: 0; }
 .total-line {
   font-size: 12px; color: var(--text-dim);
-  border-top: 1px dashed var(--border); padding-top: 8px; margin-top: 8px;
+  border-top: 1px dashed rgba(188,140,255,0.30); padding-top: 10px; margin-top: 10px;
+  word-wrap: break-word;
 }
-.total-line b { color: var(--accent); font-size: 14px; }
+.total-line b { color: var(--ceo); font-size: 14px; }
 
-/* 钩子 */
 .run-meta {
   font-size: 11px; color: var(--text-dim);
-  display: flex; gap: 16px; flex-wrap: wrap;
-  margin-bottom: 8px;
+  display: flex; gap: 12px; flex-wrap: wrap;
+  margin-bottom: 10px;
 }
 .dot {
   display: inline-block; width: 8px; height: 8px; border-radius: 50%;
   background: var(--text-dim); margin-right: 4px;
 }
 .dot.running { background: var(--accent-warm); animation: pulse 1s infinite; }
-.dot.done { background: var(--accent); }
-.dot.failed { background: var(--danger); }
+.dot.done    { background: var(--border-run); }
+.dot.failed  { background: var(--danger); }
 @keyframes pulse {
   0%, 100% { opacity: 1; }
-  50% { opacity: 0.3; }
+  50% { opacity: 0.35; }
 }
 .tiny { font-size: 11px; }
+
+/* ===== 响应式：移动端 ≤768px ===== */
+@media (max-width: 768px) {
+  header { padding: 14px 16px; }
+  header h1 { font-size: 14px; letter-spacing: 3px; white-space: normal; }
+
+  .grid {
+    grid-template-columns: 1fr;
+    gap: 18px;
+    padding: 16px 14px 32px;
+  }
+
+  .col-left, .col-right { gap: 18px; }
+
+  .panel { padding: 16px 14px; border-radius: 10px; }
+  .panel-title { font-size: 11px; letter-spacing: 2px; }
+
+  .scoreline { font-size: 18px; letter-spacing: 2px; padding: 6px 12px; }
+  .alloc-bar .key { width: 90px; font-size: 11px; }
+  .alloc-bar .amount { width: 88px; font-size: 11px; }
+
+  .blackboard { max-height: 420px; }
+
+  /* 拉起按钮在手机要更醒目 */
+  #btn-run { padding: 16px !important; font-size: 14px !important; }
+
+  /* 让 row.cols-3 在手机也不挤 */
+  .row.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+  input[type="number"] { padding: 8px 8px; font-size: 12px; }
+
+  /* 终审决策面板：避免横向溢出 */
+  .verdict .decision-line { font-size: 15px; }
+  .total-line b { font-size: 13px; }
+}
+
+/* 超小屏（≤420px）再压一波 */
+@media (max-width: 420px) {
+  header h1 { font-size: 12px; letter-spacing: 2px; }
+  .row.cols-3 { grid-template-columns: 1fr; }
+  .scorelines { gap: 8px; }
+}
 </style>
 </head>
 <body>
 
 <header>
   <h1>▎ WC2026 · QUANT DEBATE CONSOLE</h1>
-  <div class="meta">
-    base_url=<b>https://www.zzzplus.com/v1</b>
-    · model=<b id="m-model">claude-sonnet-4-6</b>
-    · budget=<b id="m-budget">8</b>
-    · deadline=<b id="m-deadline">180s</b>
-  </div>
 </header>
 
 <div class="grid">
@@ -250,10 +321,10 @@ button:disabled { opacity: 0.35; cursor: not-allowed; box-shadow: none; transfor
   <!-- ============ LEFT ============ -->
   <div class="col-left">
 
-    <!-- 密钥配置 -->
-    <div class="panel">
+    <!-- 01 · 密钥配置（银灰） -->
+    <div class="panel key">
       <div class="panel-title">▌ 01 · 密钥配置 <span class="tag">API KEY</span></div>
-      <label>Anthropic API Key (中转/官方)</label>
+      <label>Anthropic API Key（中转 / 官方）</label>
       <input type="password" id="api-key" placeholder="sk-..." autocomplete="off" />
       <div class="hint">密钥只保存在浏览器 <code>localStorage</code>，不上传服务器存储。</div>
       <div style="margin-top: 12px; display: flex; gap: 10px;">
@@ -263,8 +334,8 @@ button:disabled { opacity: 0.35; cursor: not-allowed; box-shadow: none; transfor
       <div class="hint" id="key-status">— 未保存 —</div>
     </div>
 
-    <!-- 数据注入 -->
-    <div class="panel">
+    <!-- 02 · 数据注入（科技蓝） -->
+    <div class="panel data">
       <div class="panel-title">▌ 02 · 数据注入 <span class="tag">INPUT MATCHES</span></div>
       <div class="row cols-2">
         <div>
@@ -315,22 +386,24 @@ button:disabled { opacity: 0.35; cursor: not-allowed; box-shadow: none; transfor
       <div class="hint" id="match-status">— 未加载 —</div>
     </div>
 
-    <!-- 拉起辩论 -->
-    <div class="panel">
-      <div class="panel-title">▌ 03 · 拉起专家辩论 <span class="tag">DEBATE TRIGGER</span></div>
-      <button id="btn-run" style="width:100%; padding: 14px; font-size: 14px;">▶ 拉起四角专家辩论</button>
+    <!-- 03 · 启动控制（荧光绿） -->
+    <div class="panel run">
+      <div class="panel-title">▌ 03 · 启动控制 <span class="tag">DEBATE TRIGGER</span></div>
+      <button id="btn-run" class="go" style="width:100%; padding: 14px; font-size: 14px;">▶ 拉起四角专家辩论</button>
       <div class="status-strip">
         <span>状态: <b id="m-status">idle</b></span>
         <span>用量: <b id="m-budget-used">0</b>/<span id="m-budget-cap">8</span></span>
         <span>用时: <b id="m-elapsed">0.0s</b></span>
       </div>
-      <div class="hint">单次同时只允许 1 个辩论 run；429 即排队。</div>
+      <div class="hint">单次同时只允许 1 个辩论 run；重复点击立即 429。</div>
     </div>
   </div>
 
   <!-- ============ RIGHT ============ -->
   <div class="col-right">
-    <div class="panel">
+
+    <!-- 04 · 大黑板（警示橙） -->
+    <div class="panel board">
       <div class="panel-title">▌ 04 · 大黑板 · 双轮对撞 <span class="tag">DEBATE MONITOR</span></div>
       <div class="run-meta" id="run-meta"><span class="dot"></span> idle</div>
       <div class="blackboard" id="blackboard">
@@ -338,8 +411,9 @@ button:disabled { opacity: 0.35; cursor: not-allowed; box-shadow: none; transfor
       </div>
     </div>
 
+    <!-- CEO 终审（皇家紫） -->
     <div class="panel verdict" id="verdict-panel" style="display:none;">
-      <h2>▎ CEO TERMINAL VERDICT</h2>
+      <div class="panel-title">▌ CEO TERMINAL VERDICT <span class="tag">FINAL DECISION</span></div>
       <div class="decision-line" id="v-decision">—</div>
       <div style="margin-bottom: 14px;">
         <span class="issue-pill" id="v-issue">—</span>
@@ -359,7 +433,7 @@ const API = location.origin;
 let pollTimer = null;
 let runStartMonotonic = 0;
 
-// =========== Key persistence ===========
+// ===== Key persistence =====
 function loadKey(){ return localStorage.getItem('wc2026_api_key') || ''; }
 function saveKey(k){ localStorage.setItem('wc2026_api_key', k); }
 function clearKey(){ localStorage.removeItem('wc2026_api_key'); }
@@ -379,7 +453,7 @@ document.getElementById('btn-clear-key').onclick = () => {
   document.getElementById('key-status').textContent = '— 已清除 —';
 };
 
-// =========== Match IO ===========
+// ===== Match IO =====
 async function reloadMatch(){
   const r = await fetch(API + '/api/match');
   const j = await r.json();
@@ -442,12 +516,12 @@ document.getElementById('btn-save-match').onclick = async () => {
   }
 };
 
-// =========== Debate trigger + poll ===========
+// ===== Debate trigger + poll =====
 const ROLE_NAMES = {
-  cfo: 'CFO · 风控官',
-  cro: 'CRO · 反向官',
+  cfo:     'CFO · 风控官',
+  cro:     'CRO · 反向官',
   analyst: 'ANALYST · 数据官',
-  ceo: 'CEO · 总操盘手',
+  ceo:     'CEO · 总操盘手',
 };
 
 function appendEventLine(text, cls){
@@ -472,7 +546,7 @@ function appendPosition(pos){
   if (pos.claims && pos.claims.length) {
     claimsHtml = '<ul>' + pos.claims.map(c => {
       const srcs = (c.evidence || []).map(s => s.src_ref || s.src_type).filter(Boolean).join(', ');
-      return '<li>' + escapeHtml(c.text) + (srcs ? '<span class="src">[' + escapeHtml(srcs) + ']</span>' : '') + '</li>';
+      return '<li>' + escapeHtml(c.text || '') + (srcs ? '<span class="src">[' + escapeHtml(srcs) + ']</span>' : '') + '</li>';
     }).join('') + '</ul>';
   }
   el.innerHTML = `
@@ -536,26 +610,28 @@ function renderVerdict(result){
   const env = (100 <= total && total <= 500);
   const envEl = document.getElementById('v-envelope');
   envEl.textContent = result.issue_ticket ? (env ? '✓ 通过' : '✗ 超界') : 'N/A';
-  envEl.style.color = (result.issue_ticket && !env) ? 'var(--danger)' : (result.issue_ticket ? 'var(--accent)' : 'var(--text-dim)');
+  envEl.style.color = (result.issue_ticket && !env) ? 'var(--danger)' : (result.issue_ticket ? 'var(--border-run)' : 'var(--text-dim)');
 }
 
 async function pollOnce(runId){
-  const r = await fetch(API + '/api/debate/' + runId);
-  const j = await r.json();
-  if (!j.ok) { stopPoll('error'); return; }
-  document.getElementById('m-status').textContent = j.status;
-  document.getElementById('m-budget-used').textContent = j.budget_used;
-  document.getElementById('m-budget-cap').textContent = j.budget_limit;
-  document.getElementById('m-elapsed').textContent = ((Date.now() - runStartMonotonic) / 1000).toFixed(1) + 's';
-  const dot = document.querySelector('#run-meta .dot');
-  if (j.status === 'running') dot.className = 'dot running';
-  else if (j.status === 'done') dot.className = 'dot done';
-  else if (['failed','timeout'].includes(j.status)) dot.className = 'dot failed';
-  document.getElementById('run-meta').lastChild.textContent = ' ' + j.status + ' · run_id=' + j.run_id;
-  renderEventsDelta(j.events || []);
-  if (j.result) renderVerdict(j.result);
-  if (['done','failed','timeout'].includes(j.status)) {
-    stopPoll(j.status);
+  try {
+    const r = await fetch(API + '/api/debate/' + runId);
+    const j = await r.json();
+    if (!j.ok) { stopPoll('error'); return; }
+    document.getElementById('m-status').textContent = j.status;
+    document.getElementById('m-budget-used').textContent = j.budget_used;
+    document.getElementById('m-budget-cap').textContent = j.budget_limit;
+    document.getElementById('m-elapsed').textContent = ((Date.now() - runStartMonotonic) / 1000).toFixed(1) + 's';
+    const dot = document.querySelector('#run-meta .dot');
+    if (j.status === 'running') dot.className = 'dot running';
+    else if (j.status === 'done') dot.className = 'dot done';
+    else if (['failed','timeout'].includes(j.status)) dot.className = 'dot failed';
+    document.getElementById('run-meta').lastChild.textContent = ' ' + j.status + ' · run_id=' + j.run_id;
+    renderEventsDelta(j.events || []);
+    if (j.result) renderVerdict(j.result);
+    if (['done','failed','timeout'].includes(j.status)) stopPoll(j.status);
+  } catch (e) {
+    appendEventLine('✗ 轮询异常: ' + e.message, 'error');
   }
 }
 
@@ -571,25 +647,25 @@ document.getElementById('btn-run').onclick = async () => {
   document.getElementById('verdict-panel').style.display = 'none';
   renderedEventCount = 0;
   appendEventLine('▸ 提交辩论请求…');
-  const r = await fetch(API + '/api/debate', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({api_key: key, match_index: 0}),
-  });
-  if (r.status === 429) { appendEventLine('✗ 后端正在跑另一个 run，请稍后', 'warn'); return; }
-  const j = await r.json();
-  if (!j.ok) { appendEventLine('✗ 启动失败: ' + JSON.stringify(j), 'error'); return; }
-  appendEventLine('▸ run_id = ' + j.run_id);
-  runStartMonotonic = Date.now();
-  document.getElementById('btn-run').disabled = true;
-  pollTimer = setInterval(() => pollOnce(j.run_id), 1500);
+  try {
+    const r = await fetch(API + '/api/debate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({api_key: key, match_index: 0}),
+    });
+    if (r.status === 429) { appendEventLine('✗ 后端正在跑另一个 run，请稍后', 'warn'); return; }
+    const j = await r.json();
+    if (!j.ok) { appendEventLine('✗ 启动失败: ' + JSON.stringify(j), 'error'); return; }
+    appendEventLine('▸ run_id = ' + j.run_id);
+    runStartMonotonic = Date.now();
+    document.getElementById('btn-run').disabled = true;
+    pollTimer = setInterval(() => pollOnce(j.run_id), 1500);
+  } catch (e) {
+    appendEventLine('✗ 启动异常: ' + e.message, 'error');
+  }
 };
 
-// 启动时拉取健康状态
 fetch(API + '/api/health').then(r => r.json()).then(j => {
-  document.getElementById('m-model').textContent = j.model;
-  document.getElementById('m-budget').textContent = j.max_agent_calls;
-  document.getElementById('m-deadline').textContent = j.deadline_s + 's';
   document.getElementById('m-budget-cap').textContent = j.max_agent_calls;
 }).catch(()=>{});
 reloadMatch().catch(()=>{});

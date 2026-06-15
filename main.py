@@ -166,6 +166,101 @@ def _pydantic_to_input_schema(model_cls: type[BaseModel]) -> dict:
     return schema
 
 
+def _coerce_structured_payload(raw: Any) -> dict:
+    """Pydantic 兼容防御层。
+
+    模型偶尔会把 ``claims`` / ``rationale_claims`` / ``consensus_claims``
+    / ``evidence`` 等本应是 list[dict] 的字段，吐成纯字符串或字符串化的 JSON。
+    这里做三段救场：
+      1. 顶层若不是 dict，包成 {} 兜底。
+      2. 对每个"应该是 list"的字段：
+          a) 若为 list，原样放行（同时对每个元素 _coerce_claim）；
+          b) 若为字符串，先尝试 ``json.loads``：能 parse 出 list/dict 就用；
+          c) parse 失败则包成 [{"text": <原字符串>}]，绝不让 pydantic 抛错。
+      3. ``evidence`` 内部同理。
+
+    目的：模型吐字格式微调不允许引发 Pydantic 运行时校验异常。
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out = dict(raw)
+    LIST_FIELDS = (
+        "claims",
+        "rationale_claims",
+        "consensus_claims",
+        "scorelines",
+        "key_tensions",
+        "risk_flags",
+        "agents_participated",
+    )
+    for k in LIST_FIELDS:
+        if k not in out:
+            continue
+        v = out[k]
+        if isinstance(v, list):
+            out[k] = [_coerce_claim(x) if k.endswith("claims") else x for x in v]
+            continue
+        if isinstance(v, str):
+            stripped = v.strip()
+            if not stripped:
+                out[k] = []
+                continue
+            # 尝试 json.loads
+            try:
+                decoded = json.loads(stripped)
+            except (json.JSONDecodeError, ValueError):
+                decoded = None
+            if isinstance(decoded, list):
+                out[k] = [_coerce_claim(x) if k.endswith("claims") else x for x in decoded]
+            elif isinstance(decoded, dict):
+                out[k] = [_coerce_claim(decoded)] if k.endswith("claims") else [decoded]
+            else:
+                # 任何 parse 失败的字符串 → 兜底为单 claim 包装
+                out[k] = [{"text": stripped}] if k.endswith("claims") else [stripped]
+        else:
+            out[k] = []
+    # stake_allocation 必须是 dict[str,float]
+    sa = out.get("stake_allocation")
+    if sa is not None and not isinstance(sa, dict):
+        if isinstance(sa, str):
+            try:
+                decoded = json.loads(sa)
+                out["stake_allocation"] = decoded if isinstance(decoded, dict) else {}
+            except (json.JSONDecodeError, ValueError):
+                out["stake_allocation"] = {}
+        else:
+            out["stake_allocation"] = {}
+    return out
+
+
+def _coerce_claim(item: Any) -> dict:
+    """把单个 claim 元素兜底成 dict。"""
+    if isinstance(item, dict):
+        ev = item.get("evidence")
+        if ev is not None and not isinstance(ev, list):
+            if isinstance(ev, str):
+                try:
+                    decoded = json.loads(ev)
+                    item["evidence"] = decoded if isinstance(decoded, list) else [{"source_ref": ev}]
+                except (json.JSONDecodeError, ValueError):
+                    item["evidence"] = [{"source_ref": ev}]
+            elif isinstance(ev, dict):
+                item["evidence"] = [ev]
+            else:
+                item["evidence"] = []
+        return item
+    if isinstance(item, str):
+        # 尝试 json
+        try:
+            d = json.loads(item)
+            if isinstance(d, dict):
+                return d
+        except (json.JSONDecodeError, ValueError):
+            pass
+        return {"text": item}
+    return {"text": str(item)}
+
+
 class AnthropicAgent:
     """绑定一个 Soul 的 Anthropic 智能体。强制 minimal=True。"""
 
@@ -249,8 +344,9 @@ class AnthropicAgent:
                 None,
             )
             if submit_block is not None:
+                payload = _coerce_structured_payload(submit_block.input)
                 try:
-                    parsed = output_schema(**submit_block.input)
+                    parsed = output_schema(**payload)
                 except Exception as exc:  # noqa: BLE001
                     parsed = output_schema()  # type: ignore[call-arg]
                     if hasattr(parsed, "recommendation"):
